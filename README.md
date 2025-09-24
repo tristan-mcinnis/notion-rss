@@ -7,6 +7,7 @@ Import items from one or more RSS feeds into a Notion database with idempotent u
 - ✅ Multi-feed ingestion with polite pacing to respect rate limits.
 - ✅ Idempotent upsert keyed by the Notion `URL` property with optional update suppression.
 - ✅ Tag extraction from RSS `<category>` values when the Notion database exposes a `Tags` multi-select field.
+- ✅ Optional full-article extraction converted to Markdown (via Readability + `html2markdown`) for richer Notion records.
 - ✅ Works great on macOS: the repo ships with a simple `python3` workflow that runs locally or in GitHub Actions without extra tooling.
 
 ## Notion database setup
@@ -20,10 +21,13 @@ Create (or reuse) a Notion database with at least the following properties:
 | Published     | Date        | Automatically parsed if available.    |
 | Source        | Select      | Populated with the feed title/domain. |
 | Summary       | Rich text   | Raw summary text from the feed.       |
+| Content       | Rich text   | Optional; Markdown full article text (defaults to `Content`). |
 | Author        | Rich text   | Optional author field.                |
 | Tags          | Multi-select| Optional; filled from feed categories.|
 
 > ℹ️ You can extend `build_properties()` in [`src/rss_to_notion.py`](src/rss_to_notion.py) to map additional database properties.
+
+Enable the full-text feature by adding a rich-text property (default name `Content`) to your database. The property name can be customised via `ARTICLE_CONTENT_PROPERTY` if you prefer a different label.
 
 Share the database with your Notion integration: open the database → **Share** → invite the integration you created in [Notion developer settings](https://www.notion.so/my-integrations).
 
@@ -39,6 +43,9 @@ Set the following secrets in **GitHub → Settings → Secrets and variables →
 | `MAX_ITEMS_PER_FEED` | ❌ | Limit items processed per feed (default `30`). |
 | `ALLOW_UPDATES` | ❌ | `true` (default) to update existing pages, `false` for create-only mode. |
 | `USER_AGENT` | ❌ | Custom HTTP user agent string for feed requests. |
+| `FETCH_FULL_CONTENT` | ❌ | `true` (default) to fetch and store article bodies using Readability. |
+| `ARTICLE_CONTENT_PROPERTY` | ❌ | Notion rich-text property used to store Markdown full text (default `Content`). |
+| `ARTICLE_FETCH_TIMEOUT` | ❌ | Timeout in seconds for article download requests (default `10`). |
 
 ## Local development on macOS
 
