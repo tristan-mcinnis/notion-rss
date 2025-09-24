@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import os
+import re
 import time
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import feedparser
 from notion_client import Client
@@ -42,7 +43,6 @@ MAX_ITEMS = _int_from_env("MAX_ITEMS_PER_FEED", 30)
 ALLOW_UPDATES = os.getenv("ALLOW_UPDATES", "true").lower() in {"1", "true", "yes"}
 USER_AGENT = os.getenv("USER_AGENT", "notion-rss-bot/1.0 (+https://github.com/your/repo)")
 FETCH_FULL_CONTENT = os.getenv("FETCH_FULL_CONTENT", "true").lower() in {"1", "true", "yes"}
-ARTICLE_CONTENT_PROPERTY = os.getenv("ARTICLE_CONTENT_PROPERTY", "Content").strip()
 ARTICLE_FETCH_TIMEOUT = float(os.getenv("ARTICLE_FETCH_TIMEOUT", "10"))
 
 if not (NOTION_KEY and DB_ID and RSS_FEEDS):
@@ -55,8 +55,6 @@ if USER_AGENT:
     session.headers.update({"User-Agent": USER_AGENT})
 
 
-_DB_PROPERTIES_CACHE: Optional[Dict[str, Dict]] = None
-_CONTENT_PROPERTY_WARNED = False
 _READABILITY_IMPORT_WARNED = False
 
 
@@ -77,31 +75,149 @@ def chunk_text(text: str, chunk_size: int = 1900) -> Iterable[str]:
         yield text[idx : idx + chunk_size]
 
 
-def to_rich_text(text: str, chunk_size: int = 1900) -> List[Dict[str, Dict[str, str]]]:
-    return [{"text": {"content": chunk}} for chunk in chunk_text(text, chunk_size)]
+def to_rich_text(text: str, chunk_size: int = 1900) -> List[Dict[str, Any]]:
+    return [
+        {"type": "text", "text": {"content": chunk}}
+        for chunk in chunk_text(text, chunk_size)
+    ]
 
 
-@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
-def fetch_database_properties() -> Dict[str, Dict]:
-    db = notion.databases.retrieve(DB_ID)
-    return db.get("properties", {})
+def _paragraph_block(text: str) -> Dict:
+    return {
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {"rich_text": to_rich_text(text)},
+    }
 
 
-def database_has_property(name: str) -> bool:
-    global _DB_PROPERTIES_CACHE
-    if not name:
-        return False
-    if _DB_PROPERTIES_CACHE is None:
-        try:
-            _DB_PROPERTIES_CACHE = fetch_database_properties()
-        except Exception as exc:
-            print(f"[warn] unable to inspect database properties: {exc}")
-            _DB_PROPERTIES_CACHE = {}
-    return name in _DB_PROPERTIES_CACHE
+def _heading_block(level: int, text: str) -> Dict:
+    level = min(max(level, 1), 3)
+    block_type = f"heading_{level}"
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": to_rich_text(text)},
+    }
 
 
-def build_properties(entry: Dict, source_name: str, article_markdown: Optional[str]) -> Dict:
-    global _CONTENT_PROPERTY_WARNED
+def _list_item_block(block_type: str, text: str) -> Dict:
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": to_rich_text(text)},
+    }
+
+
+def _quote_block(text: str) -> Dict:
+    return {
+        "object": "block",
+        "type": "quote",
+        "quote": {"rich_text": to_rich_text(text)},
+    }
+
+
+def _code_block(text: str, language: str) -> Dict:
+    return {
+        "object": "block",
+        "type": "code",
+        "code": {"rich_text": to_rich_text(text), "language": language or "plain text"},
+    }
+
+
+def markdown_to_blocks(markdown: str) -> List[Dict]:
+    if not markdown:
+        return []
+
+    blocks: List[Dict] = []
+    paragraph_buffer: List[str] = []
+    code_buffer: List[str] = []
+    in_code = False
+    code_language = "plain text"
+
+    def flush_paragraph() -> None:
+        if not paragraph_buffer:
+            return
+        paragraph_text = " ".join(paragraph_buffer).strip()
+        paragraph_buffer.clear()
+        if paragraph_text:
+            blocks.append(_paragraph_block(paragraph_text))
+
+    def flush_code() -> None:
+        nonlocal in_code, code_buffer
+        if not code_buffer:
+            in_code = False
+            return
+        code_text = "\n".join(code_buffer).rstrip("\n")
+        code_buffer = []
+        in_code = False
+        if code_text:
+            blocks.append(_code_block(code_text, code_language))
+
+    for raw_line in markdown.splitlines():
+        line = raw_line.rstrip("\n")
+
+        if in_code:
+            if line.strip().startswith("```"):
+                flush_code()
+            else:
+                code_buffer.append(raw_line)
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            continue
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            in_code = True
+            code_language = stripped.strip("`").strip() or "plain text"
+            code_buffer = []
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if heading_match:
+            flush_paragraph()
+            level = min(len(heading_match.group(1)), 3)
+            content = heading_match.group(2).strip()
+            if content:
+                blocks.append(_heading_block(level, content))
+            continue
+
+        if re.match(r"^[-*]\s+", stripped):
+            flush_paragraph()
+            content = re.sub(r"^[-*]\s+", "", stripped).strip()
+            if content:
+                blocks.append(_list_item_block("bulleted_list_item", content))
+            continue
+
+        if re.match(r"^\d+\.\s+", stripped):
+            flush_paragraph()
+            content = re.sub(r"^\d+\.\s+", "", stripped).strip()
+            if content:
+                blocks.append(_list_item_block("numbered_list_item", content))
+            continue
+
+        if stripped.startswith(">"):
+            flush_paragraph()
+            content = stripped.lstrip(">").strip()
+            if content:
+                blocks.append(_quote_block(content))
+            continue
+
+        paragraph_buffer.append(stripped)
+
+    if in_code:
+        flush_code()
+    flush_paragraph()
+
+    if not blocks:
+        blocks.append(_paragraph_block(markdown.strip()))
+
+    return blocks
+
+
+def build_properties(entry: Dict, source_name: str) -> Dict:
     title = entry.get("title") or entry.get("link") or "Untitled"
     url = entry.get("link") or ""
     published = (
@@ -109,16 +225,7 @@ def build_properties(entry: Dict, source_name: str, article_markdown: Optional[s
         or to_iso(entry.get("updated"))
         or to_iso(entry.get("created"))
     )
-    author = entry.get("author") or ""
     summary = entry.get("summary") or entry.get("subtitle") or ""
-
-    # Tags from RSS categories if present
-    tags: List[Dict[str, str]] = []
-    if "tags" in entry and isinstance(entry["tags"], list):
-        for t in entry["tags"]:
-            name = t.get("term") or t.get("label")
-            if name:
-                tags.append({"name": name[:90]})
 
     props = {
         "Title": {"title": [{"text": {"content": title[:200]}}]},
@@ -126,23 +233,7 @@ def build_properties(entry: Dict, source_name: str, article_markdown: Optional[s
         "Published": {"date": {"start": published} if published else None},
         "Source": {"select": {"name": source_name[:90]}},
         "Summary": {"rich_text": to_rich_text(summary)} if summary else {"rich_text": []},
-        "Author": {"rich_text": [{"text": {"content": author[:200]}}]} if author else {"rich_text": []},
     }
-
-    # Only include Tags if property exists; otherwise Notion errors
-    if database_has_property("Tags"):
-        props["Tags"] = {"multi_select": tags}
-
-    if article_markdown and ARTICLE_CONTENT_PROPERTY:
-        if database_has_property(ARTICLE_CONTENT_PROPERTY):
-            props[ARTICLE_CONTENT_PROPERTY] = {"rich_text": to_rich_text(article_markdown)}
-        else:
-            if not _CONTENT_PROPERTY_WARNED:
-                print(
-                    f"[warn] Notion database is missing the '{ARTICLE_CONTENT_PROPERTY}' property. "
-                    "Full article content will be skipped."
-                )
-                _CONTENT_PROPERTY_WARNED = True
 
     return props
 
@@ -237,14 +328,51 @@ def query_page_by_url(url: str) -> Optional[str]:
     return results[0]["id"] if results else None
 
 
-@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
-def create_page(props: Dict):
-    return notion.pages.create(parent={"database_id": DB_ID}, properties=props)
+def _chunk_blocks(blocks: List[Dict], size: int = 50) -> Iterable[List[Dict]]:
+    for idx in range(0, len(blocks), size):
+        yield blocks[idx : idx + size]
 
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
-def update_page(page_id: str, props: Dict):
-    return notion.pages.update(page_id=page_id, properties=props)
+def replace_page_children(page_id: str, children: List[Dict]) -> None:
+    existing: List[Dict] = []
+    cursor: Optional[str] = None
+    while True:
+        resp = notion.blocks.children.list(block_id=page_id, start_cursor=cursor)
+        existing.extend(resp.get("results", []))
+        if not resp.get("has_more"):
+            break
+        cursor = resp.get("next_cursor")
+
+    for child in existing:
+        child_type = child.get("type")
+        if child_type in {"child_database", "child_page"}:
+            continue
+        try:
+            notion.blocks.delete(block_id=child["id"])
+        except Exception as exc:
+            print(f"[warn] unable to remove block {child.get('id')}: {exc}")
+
+    if not children:
+        return
+
+    for chunk in _chunk_blocks(children, size=50):
+        notion.blocks.children.append(block_id=page_id, children=chunk)
+
+
+@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
+def create_page(props: Dict, children: Optional[List[Dict]] = None):
+    payload: Dict = {"parent": {"database_id": DB_ID}, "properties": props}
+    if children:
+        payload["children"] = children
+    return notion.pages.create(**payload)
+
+
+@backoff.on_exception(backoff.expo, Exception, max_tries=5, jitter=backoff.full_jitter)
+def update_page(page_id: str, props: Dict, children: Optional[List[Dict]] = None):
+    notion.pages.update(page_id=page_id, properties=props)
+    if children is not None:
+        replace_page_children(page_id, children)
 
 
 # ---------- RSS ingestion ----------
@@ -263,16 +391,7 @@ def harvest_feed(url: str) -> int:
 
     src = source_name_from_feed(parsed)
     count_new, count_updated, count_skipped = 0, 0, 0
-    should_fetch_content = FETCH_FULL_CONTENT and bool(ARTICLE_CONTENT_PROPERTY)
-    if should_fetch_content and not database_has_property(ARTICLE_CONTENT_PROPERTY):
-        global _CONTENT_PROPERTY_WARNED
-        if not _CONTENT_PROPERTY_WARNED:
-            print(
-                f"[warn] Notion database is missing the '{ARTICLE_CONTENT_PROPERTY}' property. "
-                "Full article content will be skipped."
-            )
-            _CONTENT_PROPERTY_WARNED = True
-        should_fetch_content = False
+    should_fetch_content = FETCH_FULL_CONTENT
 
     for entry in (parsed.entries or [])[:MAX_ITEMS]:
         # normalize essentials
@@ -282,15 +401,16 @@ def harvest_feed(url: str) -> int:
             continue
 
         article_markdown = extract_article_markdown(entry) if should_fetch_content else None
-        props = build_properties(entry, src, article_markdown)
+        props = build_properties(entry, src)
+        article_blocks = markdown_to_blocks(article_markdown) if article_markdown else None
         existing_id = query_page_by_url(entry_link)
 
         if existing_id is None:
-            create_page(props)
+            create_page(props, article_blocks)
             count_new += 1
         else:
             if ALLOW_UPDATES:
-                update_page(existing_id, props)
+                update_page(existing_id, props, article_blocks)
                 count_updated += 1
             else:
                 count_skipped += 1
