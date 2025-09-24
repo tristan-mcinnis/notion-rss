@@ -22,7 +22,23 @@ from html2markdown import convert as html2markdown_convert
 NOTION_KEY = os.getenv("NOTION_API_KEY", "").strip()
 DB_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
 RSS_FEEDS = [u.strip() for u in os.getenv("RSS_FEEDS", "").split(",") if u.strip()]
-MAX_ITEMS = int(os.getenv("MAX_ITEMS_PER_FEED", "30"))
+
+
+def _int_from_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    raw_stripped = raw.strip()
+    if not raw_stripped:
+        return default
+    try:
+        return int(raw_stripped)
+    except ValueError:
+        print(f"[warn] invalid value for {name}={raw!r}; using {default}")
+        return default
+
+
+MAX_ITEMS = _int_from_env("MAX_ITEMS_PER_FEED", 30)
 ALLOW_UPDATES = os.getenv("ALLOW_UPDATES", "true").lower() in {"1", "true", "yes"}
 USER_AGENT = os.getenv("USER_AGENT", "notion-rss-bot/1.0 (+https://github.com/your/repo)")
 FETCH_FULL_CONTENT = os.getenv("FETCH_FULL_CONTENT", "true").lower() in {"1", "true", "yes"}
