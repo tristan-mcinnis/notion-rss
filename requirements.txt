@@ -5,3 +5,4 @@ python-dateutil==2.9.0.post0
 requests==2.31.0
 readability-lxml==0.8.1
 html2markdown==0.1.7
+lxml-html-clean==0.1.0
