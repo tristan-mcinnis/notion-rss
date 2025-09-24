@@ -10,7 +10,13 @@ from notion_client import Client
 from dateutil import parser as dateparser
 import backoff
 import requests
-from readability import Document
+try:
+    from readability import Document  # type: ignore
+except Exception as exc:  # pragma: no cover - import-time dependency check
+    Document = None  # type: ignore[assignment]
+    _READABILITY_IMPORT_ERROR = exc
+else:
+    _READABILITY_IMPORT_ERROR = None
 from html2markdown import convert as html2markdown_convert
 
 NOTION_KEY = os.getenv("NOTION_API_KEY", "").strip()
@@ -35,6 +41,7 @@ if USER_AGENT:
 
 _DB_PROPERTIES_CACHE: Optional[Dict[str, Dict]] = None
 _CONTENT_PROPERTY_WARNED = False
+_READABILITY_IMPORT_WARNED = False
 
 
 # ---------- Notion helpers ----------
@@ -164,14 +171,23 @@ def extract_article_markdown(entry: Dict) -> Optional[str]:
 
     html = fetch_article_html(url)
     if html:
-        try:
-            doc = Document(html)
-            article_html = doc.summary()
-            markdown = html2markdown_convert(article_html or "").strip()
-            if markdown:
-                return markdown
-        except Exception as exc:
-            print(f"[warn] readability extraction failed for {url}: {exc}")
+        if Document is None:
+            global _READABILITY_IMPORT_WARNED
+            if _READABILITY_IMPORT_ERROR and not _READABILITY_IMPORT_WARNED:
+                print(
+                    "[warn] readability library unavailable (missing dependency?). "
+                    "Install 'lxml-html-clean' to enable full-article extraction."
+                )
+                _READABILITY_IMPORT_WARNED = True
+        else:
+            try:
+                doc = Document(html)
+                article_html = doc.summary()
+                markdown = html2markdown_convert(article_html or "").strip()
+                if markdown:
+                    return markdown
+            except Exception as exc:
+                print(f"[warn] readability extraction failed for {url}: {exc}")
 
     for candidate in _normalize_html_value(entry):
         try:
