@@ -45,6 +45,7 @@ ALLOW_UPDATES = os.getenv("ALLOW_UPDATES", "true").lower() in {"1", "true", "yes
 USER_AGENT = os.getenv("USER_AGENT", "notion-rss-bot/1.0 (+https://github.com/your/repo)")
 FETCH_FULL_CONTENT = os.getenv("FETCH_FULL_CONTENT", "true").lower() in {"1", "true", "yes"}
 ARTICLE_FETCH_TIMEOUT = float(os.getenv("ARTICLE_FETCH_TIMEOUT", "10"))
+INCLUDE_SUMMARY = os.getenv("INCLUDE_SUMMARY", "false").lower() in {"1", "true", "yes"}
 
 if not (NOTION_KEY and DB_ID and RSS_FEEDS):
     raise SystemExit("Missing NOTION_API_KEY, NOTION_DATABASE_ID or RSS_FEEDS envs.")
@@ -261,31 +262,35 @@ def build_properties(entry: Dict, source_name: str) -> Dict:
         or to_iso(entry.get("created"))
     )
 
-    # Extract and clean summary
-    summary_raw = entry.get("summary") or entry.get("subtitle") or ""
-    summary = ""
-    if summary_raw:
-        try:
-            # Convert HTML to clean text for the summary property
-            soup = BeautifulSoup(summary_raw, 'html.parser')
-            summary = soup.get_text(separator=' ', strip=True)
-            # Limit summary length
-            if len(summary) > 500:
-                summary = summary[:497] + "..."
-        except:
-            # If parsing fails, try to strip basic HTML tags
-            import re
-            summary = re.sub('<[^<]+?>', '', summary_raw).strip()
-            if len(summary) > 500:
-                summary = summary[:497] + "..."
-
+    # Build base properties
     props = {
         "Title": {"title": [{"text": {"content": title[:200]}}]},
         "URL": {"url": url},
         "Published": {"date": {"start": published} if published else None},
         "Source": {"select": {"name": source_name[:90]}},
-        "Summary": {"rich_text": to_rich_text(summary)} if summary else {"rich_text": []},
     }
+
+    # Only include summary if enabled (disabled by default since full content is in page)
+    if INCLUDE_SUMMARY:
+        summary_raw = entry.get("summary") or entry.get("subtitle") or ""
+        summary = ""
+        if summary_raw:
+            try:
+                # Convert HTML to clean text for the summary property
+                soup = BeautifulSoup(summary_raw, 'html.parser')
+                summary = soup.get_text(separator=' ', strip=True)
+                # Keep summary brief - just first 200 chars as a preview
+                if len(summary) > 200:
+                    # Try to break at word boundary
+                    summary = summary[:197].rsplit(' ', 1)[0] + "..."
+            except:
+                # If parsing fails, try to strip basic HTML tags
+                import re
+                summary = re.sub('<[^<]+?>', '', summary_raw).strip()
+                if len(summary) > 200:
+                    summary = summary[:197].rsplit(' ', 1)[0] + "..."
+
+        props["Summary"] = {"rich_text": to_rich_text(summary)} if summary else {"rich_text": []}
 
     return props
 

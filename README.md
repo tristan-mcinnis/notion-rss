@@ -20,7 +20,7 @@ Create (or reuse) a Notion database with at least the following properties:
 | URL           | URL         | Used as the unique identifier.        |
 | Published     | Date        | Automatically parsed if available.    |
 | Source        | Select      | Populated with the feed title/domain. |
-| Summary       | Rich text   | Raw summary text from the feed.       |
+| Summary       | Rich text   | Optional; Brief excerpt (see `INCLUDE_SUMMARY`). |
 | Content       | Rich text   | Optional; Markdown full article text (defaults to `Content`). |
 | Author        | Rich text   | Optional author field.                |
 | Tags          | Multi-select| Optional; filled from feed categories.|
@@ -46,6 +46,7 @@ Set the following secrets in **GitHub → Settings → Secrets and variables →
 | `FETCH_FULL_CONTENT` | ❌ | `true` (default) to fetch and store article bodies using Readability. |
 | `ARTICLE_CONTENT_PROPERTY` | ❌ | Notion rich-text property used to store Markdown full text (default `Content`). |
 | `ARTICLE_FETCH_TIMEOUT` | ❌ | Timeout in seconds for article download requests (default `10`). |
+| `INCLUDE_SUMMARY` | ❌ | `false` (default) to skip Summary property since content is in page; `true` to include brief excerpt. |
 
 ## Local development on macOS
 
