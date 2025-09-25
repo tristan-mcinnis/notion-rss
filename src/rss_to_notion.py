@@ -18,7 +18,7 @@ except Exception as exc:  # pragma: no cover - import-time dependency check
     _READABILITY_IMPORT_ERROR = exc
 else:
     _READABILITY_IMPORT_ERROR = None
-from html2markdown import convert as html2markdown_convert
+from markdownify import markdownify as html_to_markdown
 
 NOTION_KEY = os.getenv("NOTION_API_KEY", "").strip()
 DB_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
@@ -261,48 +261,57 @@ def _normalize_html_value(entry: Dict) -> List[str]:
 
 def fetch_article_html(url: str) -> Optional[str]:
     try:
+        print(f"[info] Fetching article from: {url}")
         resp = session.get(url, timeout=ARTICLE_FETCH_TIMEOUT)
         resp.raise_for_status()
         if not resp.encoding:
             resp.encoding = resp.apparent_encoding
+        print(f"[info] Successfully fetched {len(resp.text)} characters from {url}")
         return resp.text
     except requests.RequestException as exc:
-        print(f"[warn] unable to fetch article content from {url}: {exc}")
+        print(f"[warn] Unable to fetch article content from {url}: {exc}")
         return None
 
 
 def extract_article_markdown(entry: Dict) -> Optional[str]:
     url = entry.get("link") or ""
-    if not url:
-        return None
 
-    html = fetch_article_html(url)
-    if html:
-        if Document is None:
-            global _READABILITY_IMPORT_WARNED
-            if _READABILITY_IMPORT_ERROR and not _READABILITY_IMPORT_WARNED:
-                print(
-                    "[warn] readability library unavailable (missing dependency?). "
-                    "Install 'lxml-html-clean' to enable full-article extraction."
-                )
-                _READABILITY_IMPORT_WARNED = True
-        else:
-            try:
-                doc = Document(html)
-                article_html = doc.summary()
-                markdown = html2markdown_convert(article_html or "").strip()
-                if markdown:
-                    return markdown
-            except Exception as exc:
-                print(f"[warn] readability extraction failed for {url}: {exc}")
+    # Try to fetch and extract full article content first
+    if url:
+        html = fetch_article_html(url)
+        if html:
+            if Document is None:
+                global _READABILITY_IMPORT_WARNED
+                if _READABILITY_IMPORT_ERROR and not _READABILITY_IMPORT_WARNED:
+                    print(
+                        "[warn] readability library unavailable (missing dependency?). "
+                        "Install 'lxml-html-clean' to enable full-article extraction."
+                    )
+                    _READABILITY_IMPORT_WARNED = True
+            else:
+                try:
+                    print(f"[info] Extracting article content with readability for: {entry.get('title', 'Untitled')[:50]}...")
+                    doc = Document(html)
+                    article_html = doc.summary()
+                    if article_html:
+                        markdown = html_to_markdown(article_html, heading_style="ATX").strip()
+                        if markdown:
+                            print(f"[info] Successfully extracted {len(markdown)} characters of content")
+                            return markdown
+                except Exception as exc:
+                    print(f"[warn] Readability extraction failed for {url}: {exc}")
 
+    # Fall back to RSS content if full article extraction failed
+    print(f"[info] Falling back to RSS content for: {entry.get('title', 'Untitled')[:50]}...")
     for candidate in _normalize_html_value(entry):
         try:
-            markdown = html2markdown_convert(candidate).strip()
-        except Exception:
+            markdown = html_to_markdown(candidate, heading_style="ATX").strip()
+            if markdown:
+                print(f"[info] Converted RSS HTML to {len(markdown)} characters of markdown")
+                return markdown
+        except Exception as e:
+            print(f"[warn] Failed to convert RSS HTML: {e}")
             continue
-        if markdown:
-            return markdown
 
     return None
 
@@ -400,9 +409,50 @@ def harvest_feed(url: str) -> int:
             count_skipped += 1
             continue
 
-        article_markdown = extract_article_markdown(entry) if should_fetch_content else None
+        # Extract article content
+        article_markdown = None
+        if should_fetch_content:
+            article_markdown = extract_article_markdown(entry)
+            if article_markdown:
+                print(f"[info] Extracted full article content for: {entry.get('title', 'Untitled')[:50]}...")
+
+        # Fallback to RSS summary if no full content was extracted
+        if not article_markdown:
+            print(f"[info] Using RSS content for: {entry.get('title', 'Untitled')[:50]}...")
+            # Try to get content from multiple sources in the RSS entry
+            article_markdown = None
+
+            # First try the content field if available
+            content = entry.get("content")
+            if content and isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and "value" in item:
+                        try:
+                            article_markdown = html_to_markdown(item["value"], heading_style="ATX").strip()
+                            if article_markdown:
+                                break
+                        except Exception as e:
+                            print(f"[warn] Failed to convert content HTML: {e}")
+
+            # If no content field, try summary
+            if not article_markdown:
+                summary = entry.get("summary") or entry.get("subtitle") or ""
+                if summary:
+                    try:
+                        article_markdown = html_to_markdown(summary, heading_style="ATX").strip()
+                    except Exception as e:
+                        print(f"[warn] Failed to convert summary HTML: {e}")
+                        # Last resort - strip HTML tags manually
+                        import re
+                        article_markdown = re.sub('<[^<]+?>', '', summary).strip()
+
+            # If still no content, use title and link
+            if not article_markdown:
+                title = entry.get("title") or "Untitled"
+                article_markdown = f"# {title}\n\n[Read full article]({entry_link})"
+
         props = build_properties(entry, src)
-        article_blocks = markdown_to_blocks(article_markdown) if article_markdown else None
+        article_blocks = markdown_to_blocks(article_markdown) if article_markdown else []
         existing_id = query_page_by_url(entry_link)
 
         if existing_id is None:
