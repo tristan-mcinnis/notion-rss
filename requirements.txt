@@ -5,4 +5,5 @@ python-dateutil==2.9.0.post0
 requests==2.31.0
 readability-lxml==0.8.1
 markdownify==1.1.0
+beautifulsoup4==4.12.3
 lxml-html-clean==0.1.0

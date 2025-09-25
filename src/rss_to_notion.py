@@ -19,6 +19,7 @@ except Exception as exc:  # pragma: no cover - import-time dependency check
 else:
     _READABILITY_IMPORT_ERROR = None
 from markdownify import markdownify as html_to_markdown
+from bs4 import BeautifulSoup
 
 NOTION_KEY = os.getenv("NOTION_API_KEY", "").strip()
 DB_ID = os.getenv("NOTION_DATABASE_ID", "").strip()
@@ -56,6 +57,40 @@ if USER_AGENT:
 
 
 _READABILITY_IMPORT_WARNED = False
+
+
+def clean_html_for_markdown(html: str) -> str:
+    """Clean HTML before converting to markdown - remove data URLs, scripts, styles, etc."""
+    if not html:
+        return html
+
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+
+        # Remove images with data URLs (base64 encoded)
+        for img in soup.find_all('img'):
+            src = img.get('src', '')
+            if src.startswith('data:'):
+                # Replace with alt text or remove
+                alt_text = img.get('alt', '')
+                if alt_text:
+                    img.replace_with(f"[Image: {alt_text}]")
+                else:
+                    img.decompose()
+
+        # Remove iframes
+        for iframe in soup.find_all('iframe'):
+            iframe.decompose()
+
+        # Convert back to string
+        return str(soup)
+    except:
+        # If parsing fails, return original
+        return html
 
 
 # ---------- Notion helpers ----------
@@ -225,7 +260,24 @@ def build_properties(entry: Dict, source_name: str) -> Dict:
         or to_iso(entry.get("updated"))
         or to_iso(entry.get("created"))
     )
-    summary = entry.get("summary") or entry.get("subtitle") or ""
+
+    # Extract and clean summary
+    summary_raw = entry.get("summary") or entry.get("subtitle") or ""
+    summary = ""
+    if summary_raw:
+        try:
+            # Convert HTML to clean text for the summary property
+            soup = BeautifulSoup(summary_raw, 'html.parser')
+            summary = soup.get_text(separator=' ', strip=True)
+            # Limit summary length
+            if len(summary) > 500:
+                summary = summary[:497] + "..."
+        except:
+            # If parsing fails, try to strip basic HTML tags
+            import re
+            summary = re.sub('<[^<]+?>', '', summary_raw).strip()
+            if len(summary) > 500:
+                summary = summary[:497] + "..."
 
     props = {
         "Title": {"title": [{"text": {"content": title[:200]}}]},
@@ -294,7 +346,8 @@ def extract_article_markdown(entry: Dict) -> Optional[str]:
                     doc = Document(html)
                     article_html = doc.summary()
                     if article_html:
-                        markdown = html_to_markdown(article_html, heading_style="ATX").strip()
+                        cleaned_html = clean_html_for_markdown(article_html)
+                        markdown = html_to_markdown(cleaned_html, heading_style="ATX", strip=['img']).strip()
                         if markdown:
                             print(f"[info] Successfully extracted {len(markdown)} characters of content")
                             return markdown
@@ -305,7 +358,8 @@ def extract_article_markdown(entry: Dict) -> Optional[str]:
     print(f"[info] Falling back to RSS content for: {entry.get('title', 'Untitled')[:50]}...")
     for candidate in _normalize_html_value(entry):
         try:
-            markdown = html_to_markdown(candidate, heading_style="ATX").strip()
+            cleaned_html = clean_html_for_markdown(candidate)
+            markdown = html_to_markdown(cleaned_html, heading_style="ATX", strip=['img']).strip()
             if markdown:
                 print(f"[info] Converted RSS HTML to {len(markdown)} characters of markdown")
                 return markdown
@@ -428,7 +482,8 @@ def harvest_feed(url: str) -> int:
                 for item in content:
                     if isinstance(item, dict) and "value" in item:
                         try:
-                            article_markdown = html_to_markdown(item["value"], heading_style="ATX").strip()
+                            cleaned_html = clean_html_for_markdown(item["value"])
+                            article_markdown = html_to_markdown(cleaned_html, heading_style="ATX", strip=['img']).strip()
                             if article_markdown:
                                 break
                         except Exception as e:
@@ -439,7 +494,8 @@ def harvest_feed(url: str) -> int:
                 summary = entry.get("summary") or entry.get("subtitle") or ""
                 if summary:
                     try:
-                        article_markdown = html_to_markdown(summary, heading_style="ATX").strip()
+                        cleaned_html = clean_html_for_markdown(summary)
+                        article_markdown = html_to_markdown(cleaned_html, heading_style="ATX", strip=['img']).strip()
                     except Exception as e:
                         print(f"[warn] Failed to convert summary HTML: {e}")
                         # Last resort - strip HTML tags manually
